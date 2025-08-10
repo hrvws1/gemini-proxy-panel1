@@ -24,12 +24,33 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        /* Light mode warm background colors */
+        body {
+            background-color: #f5f3f0 !important; /* Warm light khaki background */
+        }
+
+        .bg-white {
+            background-color: #faf9f7 !important; /* Slightly warmer white for login form */
+        }
+
+        /* Input field adjustments for warm theme */
+        input[type="password"] {
+            background-color: #f8f6f3 !important; /* Warm input background */
+            border-color: #e6ddd4 !important; /* Warmer border */
+        }
+
+        input[type="password"]:focus {
+            background-color: #faf9f7 !important; /* Slightly lighter when focused */
+            border-color: #4f46e5 !important; /* Keep indigo focus border */
+            box-shadow: 0 0 0 1px #4f46e5 !important;
+        }
     </style>
 </head>
 <body class="bg-gray-100 flex items-center justify-center h-screen">
 
     <div class="bg-white p-8 rounded-lg shadow-md w-full max-w-sm">
-        <h1 class="text-2xl font-bold mb-6 text-center text-gray-800">Gemini Proxy Panel</h1>
+        <h1 class="text-2xl font-bold mb-6 text-center text-gray-800">JimiHub</h1>
 
         <!-- Error Message Area -->
         <div id="error-message" class="bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded relative mb-4 text-sm hidden" role="alert">

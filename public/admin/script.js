@@ -59,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const moonIcon = document.getElementById('moon-icon');
     // Run All Test Elements
     const runAllTestBtn = document.getElementById('run-all-test-btn');
+    const ignoreAllErrorsBtn = document.getElementById('ignore-all-errors-btn');
     const cleanErrorKeysBtn = document.getElementById('clean-error-keys-btn');
     const geminiKeysActionsDiv = document.getElementById('gemini-keys-actions');
     const testProgressArea = document.getElementById('test-progress-area');
@@ -411,10 +412,12 @@ async function renderGeminiKeys(keys) {
         // Check if there are any error keys
         const hasErrorKeys = keys.some(key => key.errorStatus === 400 || key.errorStatus === 401 || key.errorStatus === 403);
 
-        // Show/hide clean error keys button based on error keys existence
+        // Show/hide error-related buttons based on error keys existence
         if (hasErrorKeys) {
+            ignoreAllErrorsBtn.classList.remove('hidden');
             cleanErrorKeysBtn.classList.remove('hidden');
         } else {
+            ignoreAllErrorsBtn.classList.add('hidden');
             cleanErrorKeysBtn.classList.add('hidden');
         }
 
@@ -860,95 +863,8 @@ async function renderGeminiKeys(keys) {
             });
         });
 
-        // Add test button click event (no changes needed here)
-        document.querySelectorAll('.test-gemini-key').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const keyId = e.target.dataset.id;
-                const testSection = document.querySelector(`.test-model-section[data-key-id="${keyId}"]`);
-
-                // Toggle display status
-                if (testSection.classList.contains('hidden')) {
-                    // Hide all other test areas
-                    document.querySelectorAll('.test-model-section').forEach(section => {
-                        section.classList.add('hidden');
-                        section.querySelector('.test-result')?.classList.add('hidden');
-                    });
-
-                    // Show current test area
-                    testSection.classList.remove('hidden');
-                } else {
-                    testSection.classList.add('hidden');
-                }
-            });
-        });
-
-        // Add run test button click event（修正：测试报错只显示在测试区域）
-        document.querySelectorAll('.run-test-btn').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                const testSection = e.target.closest('.test-model-section');
-                const keyId = testSection.dataset.keyId;
-                const modelId = testSection.querySelector('.model-select').value;
-                const resultDiv = testSection.querySelector('.test-result');
-                const resultPre = resultDiv.querySelector('pre');
-
-                if (!modelId) {
-                    showError(t('please_select_model'));
-                    return;
-                }
-
-                // Show result area and set "Loading" text
-                resultDiv.classList.remove('hidden');
-                resultPre.textContent = t('testing');
-
-                // Send test request directly to handle both success and error responses
-                let result = null;
-                try {
-                    // Use direct fetch instead of apiFetch to get raw response
-                    const response = await fetch('/api/admin/test-gemini-key', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        credentials: 'include',
-                        body: JSON.stringify({ keyId, modelId })
-                    });
-
-                    // Parse response regardless of status code
-                    const contentType = response.headers.get("content-type");
-                    if (contentType && contentType.indexOf("application/json") !== -1) {
-                        result = await response.json();
-                    } else {
-                        const textContent = await response.text();
-                        result = {
-                            success: false,
-                            status: response.status,
-                            content: textContent || 'No response content'
-                        };
-                    }
-
-                    if (result) {
-                        const formattedContent = typeof result.content === 'object'
-                            ? JSON.stringify(result.content, null, 2)
-                            : result.content;
-
-                        if (result.success) {
-                            resultPre.textContent = `${t('test_passed')}\n${t('status')}: ${result.status}\n\n${t('response')}:\n${formattedContent}`;
-                            resultPre.className = 'text-xs bg-green-50 text-green-800 p-2 rounded overflow-x-auto';
-                        } else {
-                            resultPre.textContent = `${t('test_failed')}\n${t('status')}: ${result.status}\n\n${t('response')}:\n${formattedContent}`;
-                            resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
-                        }
-                    } else {
-                        resultPre.textContent = t('test_failed_no_response');
-                        resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
-                    }
-                } catch (error) {
-                    // 只在测试区域显示网络错误
-                    resultPre.textContent = t('test_failed_network', error.message || t('unknown_error'));
-                    resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
-                }
-            });
-        });
+        // Note: Event listeners for .test-gemini-key and .run-test-btn are now handled
+        // by global event delegation to prevent duplicate listeners and DOM reference issues
     }
 
     function renderWorkerKeys(keys) {
@@ -1318,8 +1234,11 @@ async function renderGeminiKeys(keys) {
              return;
         }
 
-        // Split input, supporting comma-separated keys
-        const geminiKeys = geminiKeyInput.split(',').map(key => key.trim()).filter(key => key !== '');
+        // Split input, supporting comma-separated keys (both English and Chinese commas) and line-separated keys
+        const geminiKeys = geminiKeyInput
+            .split(/[,，\n\r]+/)  // Split by English comma, Chinese comma, newline, or carriage return
+            .map(key => key.trim())
+            .filter(key => key !== '');
         
         // Check if there are any keys to process
         if (geminiKeys.length === 0) {
@@ -1496,8 +1415,117 @@ async function renderGeminiKeys(keys) {
         }
     });
 
-    // Delete Gemini Key (no changes needed)
+    // Global event delegation for Gemini key actions
     document.addEventListener('click', async (e) => {
+        // Handle test gemini key button clicks
+        if (e.target.classList.contains('test-gemini-key')) {
+            const keyId = e.target.dataset.id;
+            const testSection = document.querySelector(`.test-model-section[data-key-id="${keyId}"]`);
+
+            // Check if testSection exists (防止DOM重新渲染后元素不存在的错误)
+            if (!testSection) {
+                console.warn('Test section not found for keyId:', keyId);
+                return;
+            }
+
+            // Toggle display status
+            if (testSection.classList.contains('hidden')) {
+                // Hide all other test areas
+                document.querySelectorAll('.test-model-section').forEach(section => {
+                    section.classList.add('hidden');
+                    section.querySelector('.test-result')?.classList.add('hidden');
+                });
+
+                // Show current test area
+                testSection.classList.remove('hidden');
+            } else {
+                testSection.classList.add('hidden');
+            }
+            return;
+        }
+
+        // Handle run test button clicks
+        if (e.target.classList.contains('run-test-btn') && !e.target.id) { // Exclude the main "run all test" button
+            const testSection = e.target.closest('.test-model-section');
+
+            // Check if testSection exists (防止DOM重新渲染后元素不存在的错误)
+            if (!testSection) {
+                console.warn('Test section not found, possibly due to DOM re-rendering');
+                return;
+            }
+
+            const keyId = testSection.dataset.keyId;
+            const modelSelect = testSection.querySelector('.model-select');
+            const resultDiv = testSection.querySelector('.test-result');
+            const resultPre = resultDiv?.querySelector('pre');
+
+            // Additional safety checks
+            if (!keyId || !modelSelect || !resultDiv || !resultPre) {
+                console.warn('Required elements not found in test section');
+                return;
+            }
+
+            const modelId = modelSelect.value;
+
+            if (!modelId) {
+                showError(t('please_select_model'));
+                return;
+            }
+
+            // Show result area and set "Loading" text
+            resultDiv.classList.remove('hidden');
+            resultPre.textContent = t('testing');
+
+            // Send test request directly to handle both success and error responses
+            let result = null;
+            try {
+                // Use direct fetch instead of apiFetch to get raw response
+                const response = await fetch('/api/admin/test-gemini-key', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({ keyId, modelId })
+                });
+
+                // Parse response regardless of status code
+                const contentType = response.headers.get("content-type");
+                if (contentType && contentType.indexOf("application/json") !== -1) {
+                    result = await response.json();
+                } else {
+                    const textContent = await response.text();
+                    result = {
+                        success: false,
+                        status: response.status,
+                        content: textContent || 'No response content'
+                    };
+                }
+
+                if (result) {
+                    const formattedContent = typeof result.content === 'object'
+                        ? JSON.stringify(result.content, null, 2)
+                        : result.content;
+
+                    if (result.success) {
+                        resultPre.textContent = `${t('test_passed')}\n${t('status')}: ${result.status}\n\n${t('response')}:\n${formattedContent}`;
+                        resultPre.className = 'text-xs bg-green-50 text-green-800 p-2 rounded overflow-x-auto';
+                    } else {
+                        resultPre.textContent = `${t('test_failed')}\n${t('status')}: ${result.status}\n\n${t('response')}:\n${formattedContent}`;
+                        resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
+                    }
+                } else {
+                    resultPre.textContent = t('test_failed_no_response');
+                    resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
+                }
+            } catch (error) {
+                // 只在测试区域显示网络错误
+                resultPre.textContent = t('test_failed_network', error.message || t('unknown_error'));
+                resultPre.className = 'text-xs bg-red-50 text-red-800 p-2 rounded overflow-x-auto';
+            }
+            return;
+        }
+
         if (e.target.classList.contains('delete-gemini-key')) {
             const keyId = e.target.dataset.id;
             if (confirm(t('delete_confirm_gemini', keyId))) {
@@ -1817,6 +1845,42 @@ async function renderGeminiKeys(keys) {
         testCancelRequested = true;
         testStatusText.textContent = t('cancelling_tests');
         cancelAllTestBtn.disabled = true;
+    });
+
+    // Ignore All Errors Logic
+    ignoreAllErrorsBtn.addEventListener('click', async () => {
+        // Prevent concurrent operations
+        if (operationInProgress) {
+            showError(t('operation_in_progress') || 'Another operation is in progress. Please wait.');
+            return;
+        }
+
+        if (!confirm(t('ignore_all_errors_confirm'))) {
+            return;
+        }
+
+        try {
+            operationInProgress = true; // Lock operations
+            showLoading();
+            const result = await apiFetch('/clear-all-errors', {
+                method: 'POST',
+            });
+
+            if (result && result.success) {
+                if (result.clearedCount === 0) {
+                    showSuccess(t('no_error_keys_found'));
+                } else {
+                    showSuccess(t('error_keys_ignored', result.clearedCount));
+                }
+                await loadGeminiKeys(); // Reload the keys list
+            }
+        } catch (error) {
+            console.error('Error ignoring error keys:', error);
+            showError(t('failed_to_ignore_error_keys', error.message));
+        } finally {
+            operationInProgress = false; // Release lock
+            hideLoading();
+        }
     });
 
     // Clean Error Keys Logic
@@ -2403,12 +2467,17 @@ async function renderGeminiKeys(keys) {
             const webSearchToggle = document.getElementById('web-search-toggle');
             webSearchToggle.checked = settings.webSearch === '1' || settings.webSearch === 1 || settings.webSearch === true;
 
+            // Set Auto Test toggle
+            const autoTestToggle = document.getElementById('auto-test-toggle');
+            autoTestToggle.checked = settings.autoTest === '1' || settings.autoTest === 1 || settings.autoTest === true;
+
         } catch (error) {
             console.error('Error loading system settings:', error);
             // Set default values
             document.getElementById('keepalive-toggle').checked = false;
             document.getElementById('max-retry-input').value = 3;
             document.getElementById('web-search-toggle').checked = false;
+            document.getElementById('auto-test-toggle').checked = false;
         }
     }
 
@@ -2417,11 +2486,13 @@ async function renderGeminiKeys(keys) {
             const keepaliveToggle = document.getElementById('keepalive-toggle');
             const maxRetryInput = document.getElementById('max-retry-input');
             const webSearchToggle = document.getElementById('web-search-toggle');
+            const autoTestToggle = document.getElementById('auto-test-toggle');
 
             const settings = {
                 keepalive: keepaliveToggle.checked ? '1' : '0',
                 maxRetry: parseInt(maxRetryInput.value) || 3,
-                webSearch: webSearchToggle.checked ? '1' : '0'
+                webSearch: webSearchToggle.checked ? '1' : '0',
+                autoTest: autoTestToggle.checked ? '1' : '0'
             };
 
             const result = await apiFetch('/system-settings', {
@@ -2480,24 +2551,50 @@ async function renderGeminiKeys(keys) {
            const githubApiResponse = await fetch('https://api.github.com/repos/dreamhartley/gemini-proxy-panel/releases/latest');
            if (!githubApiResponse.ok) {
                console.warn('Could not fetch latest release from GitHub.');
+               // Show version display even if GitHub check fails
+               showVersionDisplay(localVersion);
                return;
            }
            const latestRelease = await githubApiResponse.json();
            const latestVersion = latestRelease.tag_name.replace('v', '').trim();
 
-           // 3. Compare versions and show notifier if the latest version is greater
+           // 3. Compare versions and show appropriate notifier
+           const updateNotifier = document.getElementById('update-notifier');
+           if (!updateNotifier) return;
+
            if (compareVersions(latestVersion, localVersion) > 0) {
-               const updateNotifier = document.getElementById('update-notifier');
-               if (updateNotifier) {
-                   updateNotifier.classList.remove('hidden');
-                   updateNotifier.textContent = 'New';
-                   updateNotifier.setAttribute('data-tooltip', t('update_available'));
-                   // Remove the default title to prevent browser tooltip
-                   updateNotifier.removeAttribute('title');
-               }
+               // Show update available notification (red)
+               updateNotifier.classList.remove('hidden', 'version-display');
+               updateNotifier.textContent = 'New';
+               updateNotifier.setAttribute('data-tooltip', t('update_available'));
+               updateNotifier.removeAttribute('title');
+           } else {
+               // Show current version (blue)
+               showVersionDisplay(localVersion);
            }
        } catch (error) {
            console.error('Error checking for updates:', error);
+           // Try to show version display even if update check fails
+           try {
+               const localVersionResponse = await fetch('/admin/version.txt?t=' + new Date().getTime());
+               if (localVersionResponse.ok) {
+                   const localVersion = (await localVersionResponse.text()).trim();
+                   showVersionDisplay(localVersion);
+               }
+           } catch (versionError) {
+               console.error('Error fetching local version:', versionError);
+           }
+       }
+   }
+
+   function showVersionDisplay(version) {
+       const updateNotifier = document.getElementById('update-notifier');
+       if (updateNotifier) {
+           updateNotifier.classList.remove('hidden');
+           updateNotifier.classList.add('version-display');
+           updateNotifier.textContent = `v${version}`;
+           updateNotifier.setAttribute('data-tooltip', t('current_is_latest'));
+           updateNotifier.removeAttribute('title');
        }
    }
 
@@ -2506,12 +2603,23 @@ window.show = function(what) {
     if (what === 'update') {
         const updateNotifier = document.getElementById('update-notifier');
         if (updateNotifier) {
-            updateNotifier.classList.remove('hidden');
+            updateNotifier.classList.remove('hidden', 'version-display');
             updateNotifier.textContent = 'New';
             updateNotifier.setAttribute('data-tooltip', t('update_available'));
             updateNotifier.removeAttribute('title');
             console.log("Debug: Forcibly showing update notifier.");
             return "Update notifier shown.";
+        } else {
+            const msg = "Debug Error: #update-notifier element not found.";
+            console.error(msg);
+            return msg;
+        }
+    } else if (what === 'version') {
+        const updateNotifier = document.getElementById('update-notifier');
+        if (updateNotifier) {
+            showVersionDisplay('1.2.0');
+            console.log("Debug: Forcibly showing version display.");
+            return "Version display shown.";
         } else {
             const msg = "Debug Error: #update-notifier element not found.";
             console.error(msg);

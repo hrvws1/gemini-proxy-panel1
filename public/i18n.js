@@ -39,9 +39,10 @@ class I18n {
                 'name_help': '用于识别的友好名称。如果未提供，将使用自动生成的ID。',
                 'api_key_value': 'API 密钥值',
                 'enter_gemini_api_key': '请输入 Gemini API 密钥',
-                'gemini_key_batch_help': '支持批量添加：使用逗号分隔多个密钥。',
+                'gemini_key_batch_help': '支持批量添加：使用逗号分隔多个密钥，或每行一个密钥。',
                 'add_gemini_key': '添加 Gemini 密钥',
                 'run_all_test': '运行所有测试',
+                'ignore_all_errors': '忽略所有报错',
                 'clean_error_keys': '清理报错密钥',
                 'loading_keys': '加载密钥中...',
 
@@ -68,9 +69,12 @@ class I18n {
                 'invalid_json': '无效的 JSON 配置',
                 'vertex_config_overwrite_confirm': '检测到已存在 Vertex 配置，是否要覆盖当前配置？',
                 'clean_error_keys_confirm': '确定要删除所有带错误标记的 Gemini 密钥吗？此操作不可撤销。',
+                'ignore_all_errors_confirm': '确定要清除所有带错误标记的 Gemini 密钥的错误状态吗？密钥将保留但错误标记会被移除。',
                 'no_error_keys_found': '没有找到带错误标记的密钥。',
                 'error_keys_cleaned': '成功清理了 {0} 个报错密钥。',
+                'error_keys_ignored': '成功忽略了 {0} 个报错密钥的错误状态。',
                 'failed_to_clean_error_keys': '清理报错密钥失败：{0}',
+                'failed_to_ignore_error_keys': '忽略报错密钥失败：{0}',
                 
                 // Worker API Keys 部分
                 'add_new_worker_key': '添加新的 Worker 密钥',
@@ -169,7 +173,10 @@ class I18n {
                 'max_retry_description': 'API请求失败时的最大重试次数（默认：3）',
                 'web_search_setting': '联网搜索',
                 'web_search_description': '启用后将在模型列表中显示带-search后缀的联网搜索模型',
-                'update_available': '有可用的新版本'
+                'auto_test_setting': '自动批量测试',
+                'auto_test_description': '启用后将在每天北京时间4点自动进行批量测试',
+                'update_available': '有可用的新版本',
+                'current_is_latest': '当前为最新版本'
              },
              en: {
                  // 登录页面
@@ -207,15 +214,19 @@ class I18n {
                 'name_help': 'A friendly name for identification. If not provided, an auto-generated ID will be used.',
                 'api_key_value': 'API Key Value',
                 'enter_gemini_api_key': 'Enter Gemini API Key',
-                'gemini_key_batch_help': 'Batch addition supported: Use commas to separate multiple keys.',
+                'gemini_key_batch_help': 'Batch addition supported: Use commas to separate multiple keys, or one key per line.',
                 'add_gemini_key': 'Add Gemini Key',
                 'run_all_test': 'Run All Test',
+                'ignore_all_errors': 'Ignore All Errors',
                 'clean_error_keys': 'Clean Error Keys',
                 'loading_keys': 'Loading keys...',
                 'clean_error_keys_confirm': 'Are you sure you want to delete all Gemini keys with error status? This action cannot be undone.',
+                'ignore_all_errors_confirm': 'Are you sure you want to clear error status for all Gemini keys with errors? Keys will be kept but error marks will be removed.',
                 'no_error_keys_found': 'No keys with error status found.',
                 'error_keys_cleaned': 'Successfully cleaned {0} error keys.',
+                'error_keys_ignored': 'Successfully ignored error status for {0} keys.',
                 'failed_to_clean_error_keys': 'Failed to clean error keys: {0}',
+                'failed_to_ignore_error_keys': 'Failed to ignore error keys: {0}',
 
                 // Vertex AI Configuration
                 'current_vertex_config': 'Current Vertex Configuration',
@@ -337,7 +348,10 @@ class I18n {
                 'max_retry_description': 'Maximum retry attempts for failed API requests (default: 3)',
                 'web_search_setting': 'Web Search',
                 'web_search_description': 'Enable to show models with -search suffix for web search functionality',
-                'update_available': 'A new version is available'
+                'auto_test_setting': 'Auto Batch Test',
+                'auto_test_description': 'Enable to automatically run batch tests daily at 4 AM Beijing time',
+                'update_available': 'A new version is available',
+                'current_is_latest': 'Current is latest version'
              }
          };
          

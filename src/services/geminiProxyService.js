@@ -1,7 +1,7 @@
 const fetch = require('node-fetch');
 const { Readable } = require('stream');
 const { URL } = require('url'); // Import URL for parsing remains relevant for potential future URL parsing
-const { syncToGitHub } = require('../db');
+const dbModule = require('../db');
 const configService = require('./configService');
 const geminiKeyService = require('./geminiKeyService');
 const transformUtils = require('../utils/transform');
@@ -10,12 +10,25 @@ const proxyPool = require('../utils/proxyPool'); // Import the new proxy pool mo
 
 // Base Gemini API URL
 const BASE_GEMINI_URL = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
-// Cloudflare Gateway base path
-const CF_GATEWAY_BASE = 'https://gateway.ai.cloudflare.com/v1';
-// Project ID regex pattern - 32 character hex string
-const PROJECT_ID_REGEX = /^[0-9a-f]{32}$/i;
-// Default Cloudflare Gateway project ID (Replace with your actual default if needed)
-const DEFAULT_PROJECT_ID = 'db16589aa22233d56fe69a2c3161fe3c';
+
+// Helper function to check if a 400 error should be marked for key error
+function shouldMark400Error(errorObject) {
+    try {
+        // Only mark 400 errors if the message indicates invalid API key
+        if (errorObject && errorObject.message) {
+            const errorMessage = errorObject.message;
+
+            // Check for the specific "API key not valid" error
+            if (errorMessage && errorMessage.includes('API key not valid. Please pass a valid API key.')) {
+                return true;
+            }
+        }
+        return false;
+    } catch (e) {
+        // If we can't parse the error, don't mark it
+        return false;
+    }
+}
 
 async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thinkingBudget, keepAliveCallback = null) {
     const requestedModelId = openAIRequestBody?.model;
@@ -41,11 +54,11 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
         [modelsConfig, isSafetyEnabled, MAX_RETRIES, keepAliveEnabled] = await Promise.all([
             configService.getModelsConfig(),
             configService.getWorkerKeySafetySetting(workerApiKey), // Get safety setting for this worker key
-            configService.getSetting('max_retry', process.env.MAX_RETRY || '3').then(val => parseInt(val) || 3),
-            configService.getSetting('keepalive', process.env.KEEPALIVE || '0').then(val => String(val) === '1')
+            configService.getSetting('max_retry', '3').then(val => parseInt(val) || 3),
+            configService.getSetting('keepalive', '0').then(val => String(val) === '1')
         ]);
 
-        console.log(`Using MAX_RETRIES: ${MAX_RETRIES} (from database or environment variable)`);
+        console.log(`Using MAX_RETRIES: ${MAX_RETRIES} (from database)`);
         console.log(`KEEPALIVE settings - keepAliveEnabled: ${keepAliveEnabled}, stream: ${stream}, isSafetyEnabled: ${isSafetyEnabled}`);
 
         // Check if web search functionality needs to be added
@@ -86,7 +99,6 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
         // --- Retry Loop ---
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             let selectedKey;
-            let forceNewKey = false; // Flag to force getting a new key on retry
             try {
                 // 1. Get Key inside the loop for each attempt
                 // If it's a search model, use the original model ID to get the API key
@@ -110,8 +122,8 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
 
                 console.log(`Attempt ${attempt}: Proxying request for model: ${requestedModelId}, Category: ${modelCategory}, KeyID: ${selectedKey.id}, Safety: ${isSafetyEnabled}`);
 
-                // 3. Transform Request Body (remains the same)
-                const { contents, systemInstruction, tools: geminiTools } = transformUtils.transformOpenAiToGemini(
+                // 3. Transform Request Body (includes tool_choice support)
+                const { contents, systemInstruction, tools: geminiTools, toolConfig } = transformUtils.transformOpenAiToGemini(
                     openAIRequestBody,
                     requestedModelId,
                     isSafetyEnabled // Pass safety setting to transformer
@@ -131,6 +143,7 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
                         ...(thinkingBudget !== undefined && { thinkingConfig: { thinkingBudget: thinkingBudget } }),
                     },
                     ...(geminiTools && { tools: geminiTools }),
+                    ...(toolConfig && { toolConfig: toolConfig }),
                     ...(systemInstruction && { systemInstruction: systemInstruction }),
                 };
 
@@ -170,61 +183,10 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
                 // 4. Prepare and Send Request to Gemini
                 // If keepalive is enabled and original request was streaming, use non-streaming API
                 const apiAction = actualStreamMode ? 'streamGenerateContent' : 'generateContent';
-                
-                // Determine Base URL based on CF_GATEWAY environment variable
-                let baseUrl = BASE_GEMINI_URL; // Default to standard Gemini URL
-                const cfGateway = process.env.CF_GATEWAY;
 
-                // Return default URL if CF_GATEWAY is not set
-                if (!cfGateway) {
-                    // Use default Gemini API URL (already set)
-                } else {
-                    // Handle case 1: CF_GATEWAY = "1" (use default project ID)
-                    if (cfGateway === '1') {
-                        // Validate default project ID format
-                        if (PROJECT_ID_REGEX.test(DEFAULT_PROJECT_ID)) {
-                            // Only use default Cloudflare Gateway if project ID format is valid
-                            baseUrl = `${CF_GATEWAY_BASE}/${DEFAULT_PROJECT_ID}/gemini/google-ai-studio`;
-                            console.log(`Using default Cloudflare Gateway: ${baseUrl}`);
-                        } else {
-                             console.warn(`Invalid DEFAULT_PROJECT_ID format: ${DEFAULT_PROJECT_ID}. Falling back to default Gemini URL.`);
-                        }
-                        // If invalid, fall back to default Gemini API URL (already set)
-                    } else {
-                        // Handle case 2: CF_GATEWAY contains projectId/gatewayName
-                        try {
-                            // Remove trailing slashes
-                            let gatewayValue = cfGateway.replace(/\/+$/, '');
-
-                            // Try to extract projectId/gatewayName pattern from anywhere in the string
-                            // This will work for both full URLs and direct format strings like "projectId/gatewayName"
-                            const pattern = /([0-9a-f]{32})\/([^\/\s]+)/i;
-                            const matches = gatewayValue.match(pattern);
-
-                            if (matches && matches.length >= 3) {
-                                const projectId = matches[1];
-                                const gatewayName = matches[2];
-
-                                if (PROJECT_ID_REGEX.test(projectId)) {
-                                    baseUrl = `${CF_GATEWAY_BASE}/${projectId}/${gatewayName}/google-ai-studio`;
-                                    console.log(`Using custom Cloudflare Gateway: ${baseUrl}`);
-                                } else {
-                                     console.warn(`Invalid Project ID format found in CF_GATEWAY: ${projectId}. Falling back to default Gemini URL.`);
-                                }
-                            } else {
-                                console.warn(`CF_GATEWAY value "${cfGateway}" does not match expected format (e.g., 'projectId/gatewayName' or full URL). Falling back to default Gemini URL.`);
-                            }
-                        } catch (error) {
-                            console.error('Error parsing CF_GATEWAY value:', error);
-                            // Fall back to default URL on error (already set)
-                        }
-                    }
-                    // For any other value or format issue of CF_GATEWAY, keep using default Gemini API URL
-                }
-
-                // Build complete API URL using the determined base URL
+                // Build complete API URL using the base URL
                 // Use actualModelId instead of requestedModelId with -search suffix
-                const geminiUrl = `${baseUrl}/v1beta/models/${actualModelId}:${apiAction}`;
+                const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}`;
 
                 const geminiRequestHeaders = {
                     'Content-Type': 'application/json',
@@ -265,13 +227,108 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
                     fetchOptions.agent = agent;
                 }
 
-                // Start keepalive heartbeat if in KEEPALIVE mode (only on first attempt)
-                if (useKeepAlive && keepAliveCallback && attempt === 1) {
-                    console.log('KEEPALIVE: Starting heartbeat before sending upstream request');
-                    keepAliveCallback.startHeartbeat();
+                // For KEEPALIVE mode, handle the request asynchronously to avoid blocking
+                // If using keepalive, handle it asynchronously with its own retry logic inside.
+                // This is because the main retry loop is synchronous and we need to return immediately.
+                if (useKeepAlive && keepAliveCallback) {
+                    
+                    const keepAliveRunner = async () => {
+                        console.log('KEEPALIVE: Starting heartbeat and asynchronous request process.');
+                        keepAliveCallback.startHeartbeat();
+
+                        let lastKeepAliveError = null;
+                        let lastKeepAliveStatus = 500;
+
+                        for (let kAttempt = 1; kAttempt <= MAX_RETRIES; kAttempt++) {
+                            let keepAliveKey;
+                            try {
+                                const keyModelId = isSearchModel ? actualModelId : requestedModelId;
+                                keepAliveKey = await geminiKeyService.getNextAvailableGeminiKey(keyModelId);
+
+                                if (!keepAliveKey) {
+                                    lastKeepAliveError = { message: "No available Gemini API Key for keepalive retry." };
+                                    lastKeepAliveStatus = 503;
+                                    console.error(`KEEPALIVE Attempt ${kAttempt}: No more keys to try.`);
+                                    continue; // Try to find a key in the next attempt
+                                }
+                                
+                                const currentGeminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:generateContent`;
+                                const currentFetchOptions = {
+                                    ...fetchOptions,
+                                    headers: { ...fetchOptions.headers, 'x-goog-api-key': keepAliveKey.key },
+                                    agent: proxyPool.getNextProxyAgent()
+                                };
+                                const logSuffix = currentFetchOptions.agent ? ` via proxy ${currentFetchOptions.agent.proxy.href}` : '';
+                                console.log(`KEEPALIVE Attempt ${kAttempt}: Sending request to ${currentGeminiUrl}${logSuffix} with key ID ${keepAliveKey.id}`);
+
+                                const geminiResponse = await fetch(currentGeminiUrl, currentFetchOptions);
+
+                                if (!geminiResponse.ok) {
+                                    const errorBodyText = await geminiResponse.text();
+                                    lastKeepAliveStatus = geminiResponse.status;
+                                    try {
+                                        lastKeepAliveError = JSON.parse(errorBodyText).error || { message: errorBodyText };
+                                    } catch {
+                                        lastKeepAliveError = { message: errorBodyText };
+                                    }
+                                    console.error(`KEEPALIVE Attempt ${kAttempt}: Gemini API error ${geminiResponse.status}:`, lastKeepAliveError.message);
+                                    
+                                    // Handle key errors for retry
+                                     if (geminiResponse.status === 429) {
+                                        geminiKeyService.handle429Error(keepAliveKey.id, modelCategory, actualModelId, lastKeepAliveError).catch(e => console.error("BG 429 Error:", e));
+                                    } else if (geminiResponse.status === 400 && shouldMark400Error(lastKeepAliveError)) {
+                                        geminiKeyService.recordKeyError(keepAliveKey.id, 400).catch(e => console.error("BG 400 Error:", e));
+                                    } else if ([401, 403, 500].includes(geminiResponse.status)) {
+                                         geminiKeyService.recordKeyError(keepAliveKey.id, geminiResponse.status).catch(e => console.error("BG Key Error:", e));
+                                    }
+                                    
+                                    // Continue to next attempt if not the last one
+                                    if (kAttempt < MAX_RETRIES) {
+                                         console.warn(`KEEPALIVE Attempt ${kAttempt} failed. Retrying...`);
+                                         continue;
+                                    } else {
+                                        // Last attempt failed, break loop to send error
+                                        break;
+                                    }
+                                }
+                                
+                                // Success case
+                                const geminiResponseData = await geminiResponse.json();
+                                geminiKeyService.incrementKeyUsage(keepAliveKey.id, actualModelId, modelCategory).catch(e => console.error("BG Usage Error:", e));
+                                console.log(`KEEPALIVE: Request successful on attempt ${kAttempt}. Stopping heartbeat.`);
+                                keepAliveCallback.stopHeartbeat();
+                                keepAliveCallback.sendFinalResponse(geminiResponseData);
+                                return; // Exit the runner function on success
+
+                            } catch (fetchError) {
+                                lastKeepAliveError = { message: `Internal Proxy Error during keepalive fetch: ${fetchError.message}`, type: 'proxy_internal_error' };
+                                lastKeepAliveStatus = 500;
+                                console.error(`KEEPALIVE Attempt ${kAttempt}: Fetch error:`, fetchError);
+                                // Don't retry on network errors, just fail
+                                break;
+                            }
+                        }
+                        
+                        // If loop finishes, all retries have failed
+                        console.error(`KEEPALIVE: All ${MAX_RETRIES} attempts failed. Sending last error.`);
+                        keepAliveCallback.stopHeartbeat();
+                        keepAliveCallback.sendError(lastKeepAliveError || { message: "All keepalive attempts failed." });
+                    };
+
+                    keepAliveRunner(); // Run the async function
+
+                    // Return immediately to the client, while keepAliveRunner works in the background
+                    return {
+                        isKeepAlive: true,
+                        // Note: selectedKeyId is not definitively known here, as it's selected inside the async runner.
+                        // We can return the first-attempt key, or null. Let's return the one from the main loop's current attempt.
+                        selectedKeyId: selectedKey.id,
+                        modelCategory: modelCategory,
+                        requestedModelId: requestedModelId
+                    };
                 }
 
-                const geminiResponse = await fetch(geminiUrl, fetchOptions); // Use fetchOptions
+                const geminiResponse = await fetch(geminiUrl, fetchOptions); // Use fetchOptions for non-KEEPALIVE mode
 
                 // 5. Handle Gemini Response Status and Errors
                 if (!geminiResponse.ok) {
@@ -301,8 +358,17 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
                         // Record persistent error for the key
                         geminiKeyService.recordKeyError(selectedKey.id, geminiResponse.status)
                              .catch(err => console.error(`Error recording key error ${geminiResponse.status} for key ${selectedKey.id} in background:`, err));
+                    } else if (geminiResponse.status === 400) {
+                        // Check if this is an invalid API key 400 error that should be marked
+                        console.log(`400 error details: ${JSON.stringify(lastError)}`);
+                        if (shouldMark400Error(lastError)) {
+                            geminiKeyService.recordKeyError(selectedKey.id, geminiResponse.status)
+                                .catch(err => console.error(`Error recording key error ${geminiResponse.status} for key ${selectedKey.id} in background:`, err));
+                        } else {
+                            console.log(`Skipping error marking for key ${selectedKey.id} - 400 error not related to invalid API key.`);
+                        }
                     } else {
-                        // Record error for other status codes (400, 500, etc.)
+                        // Record error for other status codes (500, etc.)
                         console.log(`${geminiResponse.status} error details: ${JSON.stringify(lastError)}`);
                         geminiKeyService.recordKeyError(selectedKey.id, geminiResponse.status)
                              .catch(err => console.error(`Error recording key error ${geminiResponse.status} for key ${selectedKey.id} in background:`, err));
@@ -326,54 +392,13 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream, thi
                     geminiKeyService.incrementKeyUsage(selectedKey.id, actualModelId, modelCategory)
                           .catch(err => console.error(`Error incrementing usage for key ${selectedKey.id} in background:`, err));
 
-                    // For KEEPALIVE mode with streaming client request
-                    if (useKeepAlive) {
-                        // Get the complete non-streaming response
-                        const geminiResponseData = await geminiResponse.json();
-
-                        // Stop keepalive heartbeat now that we have the response
-                        if (keepAliveCallback) {
-                            console.log('KEEPALIVE: Stopping heartbeat after receiving upstream response');
-                            keepAliveCallback.stopHeartbeat();
-                        }
-
-                        // Check if it's an empty response (finishReason is OTHER and no content)
-                        const isEmptyResponse = geminiResponseData.candidates &&
-                                               geminiResponseData.candidates[0] &&
-                                               geminiResponseData.candidates[0].finishReason === "OTHER" &&
-                                               (!geminiResponseData.candidates[0].content ||
-                                                !geminiResponseData.candidates[0].content.parts ||
-                                                geminiResponseData.candidates[0].content.parts.length === 0);
-
-                        if (isEmptyResponse && attempt < MAX_RETRIES) {
-                            console.log(`Detected empty response (finishReason: OTHER), attempting retry #${attempt + 1} with a new key...`);
-                            if (useKeepAlive && keepAliveCallback) {
-                                console.log(`KEEPALIVE: Continuing heartbeat during empty response retry attempt ${attempt + 1}`);
-                            }
-                            // Skip this key on next attempt
-                            forceNewKey = true;
-                            continue; // Continue to the next attempt
-                        }
-
-                        console.log(`Chat completions call completed successfully.`);
-
-                        // Return the complete response data, let apiV1.js handle keepalive and response sending
-                        return {
-                            response: geminiResponseData, // Directly return the parsed JSON data
-                            selectedKeyId: selectedKey.id,
-                            modelCategory: modelCategory,
-                            isKeepAlive: true, // Mark this as a keepalive mode response
-                            requestedModelId: requestedModelId // Pass modelId for subsequent use
-                        };
-                    } else {
-                        // For non-KEEPALIVE mode (正常流式)，不要提前消费 response.body，直接返回
-                        console.log(`Chat completions call completed successfully.`);
-                        return {
-                            response: geminiResponse,
-                            selectedKeyId: selectedKey.id,
-                            modelCategory: modelCategory
-                        };
-                    }
+                    // For non-KEEPALIVE mode (正常流式)，不要提前消费 response.body，直接返回
+                    console.log(`Chat completions call completed successfully.`);
+                    return {
+                        response: geminiResponse,
+                        selectedKeyId: selectedKey.id,
+                        modelCategory: modelCategory
+                    };
                 }
 
             } catch (fetchError) {

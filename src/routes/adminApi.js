@@ -3,8 +3,10 @@ const requireAdminAuth = require('../middleware/adminAuth');
 const configService = require('../services/configService');
 const geminiKeyService = require('../services/geminiKeyService');
 const vertexProxyService = require('../services/vertexProxyService');
+const batchTestService = require('../services/batchTestService');
+// Note: schedulerService is imported lazily when needed to avoid database initialization issues
 const fetch = require('node-fetch');
-const { syncToGitHub } = require('../db');
+const dbModule = require('../db');
 const proxyPool = require('../utils/proxyPool'); // Import the proxy pool module
 const router = express.Router();
 
@@ -88,63 +90,24 @@ router.delete('/gemini-keys/:id', async (req, res, next) => {
 
 // Base Gemini API URL
 const BASE_GEMINI_URL = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
-// Cloudflare Gateway base path
-const CF_GATEWAY_BASE = 'https://gateway.ai.cloudflare.com/v1';
-// Project ID regex pattern - 32 character hex string
-const PROJECT_ID_REGEX = /^[0-9a-f]{32}$/i;
-// Default Cloudflare Gateway project ID (Ensure this matches geminiProxyService.js or is appropriate)
-const DEFAULT_PROJECT_ID = 'db16589aa22233d56fe69a2c3161fe3c';
 
-// Helper to get the base URL for Gemini API, considering CF_GATEWAY
-function getGeminiBaseUrl() {
-    let baseUrl = BASE_GEMINI_URL; // Default to standard Gemini URL
-    const cfGateway = process.env.CF_GATEWAY;
+// Helper function to check if a 400 error should be marked for key error
+function shouldMark400Error(responseBody) {
+    try {
+        // Only mark 400 errors if the message indicates invalid API key
+        if (responseBody && responseBody.error) {
+            const errorMessage = responseBody.error.message;
 
-    // Return default URL if CF_GATEWAY is not set
-    if (!cfGateway) {
-        // Use default Gemini API URL (already set)
-    } else {
-        // Handle case 1: CF_GATEWAY = "1" (use default project ID)
-        if (cfGateway === '1') {
-            // Validate default project ID format
-            if (PROJECT_ID_REGEX.test(DEFAULT_PROJECT_ID)) {
-                // Only use default Cloudflare Gateway if project ID format is valid
-                baseUrl = `${CF_GATEWAY_BASE}/${DEFAULT_PROJECT_ID}/gemini/google-ai-studio`;
-                console.log(`Admin API: Using default Cloudflare Gateway: ${baseUrl}`);
-            } else {
-                 console.warn(`Admin API: Invalid DEFAULT_PROJECT_ID format: ${DEFAULT_PROJECT_ID}. Falling back to default Gemini URL.`);
-            }
-            // If invalid, fall back to default Gemini API URL (already set)
-        } else {
-            // Handle case 2: CF_GATEWAY contains projectId/gatewayName
-            try {
-                // Remove trailing slashes
-                let gatewayValue = cfGateway.replace(/\/+$/, '');
-
-                // Try to extract projectId/gatewayName pattern from anywhere in the string
-                const pattern = /([0-9a-f]{32})\/([^\/\s]+)/i;
-                const matches = gatewayValue.match(pattern);
-
-                if (matches && matches.length >= 3) {
-                    const projectId = matches[1];
-                    const gatewayName = matches[2];
-
-                    if (PROJECT_ID_REGEX.test(projectId)) {
-                        baseUrl = `${CF_GATEWAY_BASE}/${projectId}/${gatewayName}/google-ai-studio`;
-                        console.log(`Admin API: Using custom Cloudflare Gateway: ${baseUrl}`);
-                    } else {
-                         console.warn(`Admin API: Invalid Project ID format found in CF_GATEWAY: ${projectId}. Falling back to default Gemini URL.`);
-                    }
-                } else {
-                    console.warn(`Admin API: CF_GATEWAY value "${cfGateway}" does not match expected format. Falling back to default Gemini URL.`);
-                }
-            } catch (error) {
-                console.error('Admin API: Error parsing CF_GATEWAY value:', error);
-                // Fall back to default URL on error (already set)
+            // Check for the specific "API key not valid" error
+            if (errorMessage && errorMessage.includes('API key not valid. Please pass a valid API key.')) {
+                return true;
             }
         }
+        return false;
+    } catch (e) {
+        // If we can't parse the error, don't mark it
+        return false;
     }
-    return baseUrl;
 }
 
 // --- Test Gemini Key --- (/api/admin/test-gemini-key)
@@ -180,8 +143,7 @@ router.post('/test-gemini-key', async (req, res, next) => {
         }
 
         const testGeminiRequestBody = { contents: [{ role: "user", parts: [{ text: "Hi" }] }] };
-        const baseUrl = getGeminiBaseUrl();
-        const geminiUrl = `${baseUrl}/v1beta/models/${modelId}:generateContent`;
+        const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${modelId}:generateContent`;
 
         let testResponseStatus = 500;
         let testResponseBody = null;
@@ -213,10 +175,30 @@ router.post('/test-gemini-key', async (req, res, next) => {
 if (isSuccess) {
                  // Increment usage and sync to GitHub
                  await geminiKeyService.incrementKeyUsage(keyId, modelId, modelCategory);
+
+                 // Clear error status if the key was previously marked with an error
+                 // This allows previously failed keys to be restored when they work again during batch testing
+                 try {
+                     const wasCleared = await geminiKeyService.clearKeyError(keyId);
+                     if (wasCleared) {
+                         console.log(`Restored key ${keyId} - cleared previous error status during testing.`);
+                     }
+                 } catch (clearError) {
+                     // Log but don't fail the test if clearing error status fails
+                     console.warn(`Failed to clear error status for key ${keyId}:`, clearError);
+                 }
             } else {
                  // Record 400/401/403 errors (invalid API key, unauthorized, forbidden)
-                 if (testResponseStatus === 400 || testResponseStatus === 401 || testResponseStatus === 403) {
+                 // But only mark 400 errors if they indicate invalid API key
+                 if (testResponseStatus === 401 || testResponseStatus === 403) {
                      await geminiKeyService.recordKeyError(keyId, testResponseStatus);
+                 } else if (testResponseStatus === 400) {
+                     // Check if this is an invalid API key 400 error that should be marked
+                     if (shouldMark400Error(testResponseBody)) {
+                         await geminiKeyService.recordKeyError(keyId, testResponseStatus);
+                     } else {
+                         console.log(`Skipping error marking for key ${keyId} - 400 error not related to invalid API key.`);
+                     }
                  }
             }
 
@@ -244,8 +226,7 @@ router.get('/gemini-models', async (req, res, next) => {
      try {
          // Helper function to fetch models with a specific key
          const fetchModelsWithKey = async (key) => {
-             const baseUrl = getGeminiBaseUrl();
-             const geminiUrl = `${baseUrl}/v1beta/models`;
+             const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models`;
 
              // Get proxy agent
              const agent = proxyPool.getNextProxyAgent();
@@ -302,10 +283,24 @@ router.get('/gemini-models', async (req, res, next) => {
                      const errorBody = await response.text();
                      console.error(`Attempt ${attempt}: Error fetching Gemini models list (key ${keyId}): ${response.status} ${response.statusText}`, errorBody);
 
-                     // Mark key as invalid if it's a persistent error (401/403)
+                     // Mark key as invalid if it's a persistent error (401/403/400)
                      if (response.status === 401 || response.status === 403) {
                          console.log(`Marking key ${keyId} as invalid due to ${response.status} error during model list fetch`);
                          await geminiKeyService.recordKeyError(keyId, response.status);
+                     } else if (response.status === 400) {
+                         // Check if this is an invalid API key 400 error that should be marked
+                         try {
+                             const errorBodyJson = JSON.parse(errorBody);
+                             if (shouldMark400Error(errorBodyJson)) {
+                                 console.log(`Marking key ${keyId} as invalid due to 400 error during model list fetch`);
+                                 await geminiKeyService.recordKeyError(keyId, response.status);
+                             } else {
+                                 console.log(`Skipping error marking for key ${keyId} during model list fetch - 400 error not related to invalid API key.`);
+                             }
+                         } catch (parseError) {
+                             // If we can't parse the error body, don't mark it as error
+                             console.log(`Skipping error marking for key ${keyId} during model list fetch - unparseable 400 response`);
+                         }
                      }
 
                      lastError = { status: response.status, body: errorBody };
@@ -362,6 +357,19 @@ router.delete('/error-keys', async (req, res, next) => {
             success: true,
             deletedCount: result.deletedCount,
             deletedKeys: result.deletedKeys
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+router.post('/clear-all-errors', async (req, res, next) => {
+    try {
+        const result = await geminiKeyService.clearAllErrorKeys();
+        res.json({
+            success: true,
+            clearedCount: result.clearedCount,
+            clearedKeys: result.clearedKeys
         });
     } catch (error) {
         next(error);
@@ -624,16 +632,18 @@ router.post('/vertex-config/test', async (req, res, next) => {
 router.route('/system-settings')
     .get(async (req, res, next) => {
         try {
-            // Get settings from database, fallback to environment variables
-            const keepalive = await configService.getSetting('keepalive', process.env.KEEPALIVE || '0');
-            const maxRetry = await configService.getSetting('max_retry', process.env.MAX_RETRY || '3');
+            // Get settings from database
+            const keepalive = await configService.getSetting('keepalive', '0');
+            const maxRetry = await configService.getSetting('max_retry', '3');
             const webSearch = await configService.getSetting('web_search', '0');
+            const autoTest = await configService.getSetting('auto_test', '0');
 
             // Ensure consistent data types
             res.json({
                 keepalive: String(keepalive), // Ensure it's a string
                 maxRetry: parseInt(maxRetry) || 3,
-                webSearch: String(webSearch)
+                webSearch: String(webSearch),
+                autoTest: String(autoTest)
             });
         } catch (error) {
             next(error);
@@ -641,7 +651,7 @@ router.route('/system-settings')
     })
     .post(async (req, res, next) => {
         try {
-            const { keepalive, maxRetry, webSearch } = parseBody(req);
+            const { keepalive, maxRetry, webSearch, autoTest } = parseBody(req);
 
             // Validate inputs
             if (keepalive !== '0' && keepalive !== '1') {
@@ -657,21 +667,71 @@ router.route('/system-settings')
                 return res.status(400).json({ error: 'WEB_SEARCH must be "0" or "1"' });
             }
 
-            // Save to database
-            await configService.setSetting('keepalive', keepalive);
-            await configService.setSetting('max_retry', maxRetryNum.toString());
-            await configService.setSetting('web_search', webSearch);
+            if (autoTest !== '0' && autoTest !== '1') {
+                return res.status(400).json({ error: 'AUTO_TEST must be "0" or "1"' });
+            }
+
+            // Save to database (skip sync for first three, sync on the last one)
+            await configService.setSetting('keepalive', keepalive, true); // Skip sync
+            await configService.setSetting('max_retry', maxRetryNum.toString(), true); // Skip sync
+            await configService.setSetting('web_search', webSearch, true); // Skip sync
+            await configService.setSetting('auto_test', autoTest); // Trigger sync on last setting
+
+            // Update scheduler service when auto_test setting changes
+            try {
+                const schedulerService = require('../services/schedulerService');
+                await schedulerService.updateBatchTestSchedule();
+                console.log('Scheduler updated after auto_test setting change');
+            } catch (schedulerError) {
+                console.error('Failed to update scheduler:', schedulerError);
+                // Don't fail the request if scheduler update fails
+            }
 
             res.json({
                 success: true,
                 keepalive: keepalive,
                 maxRetry: maxRetryNum,
-                webSearch: webSearch
+                webSearch: webSearch,
+                autoTest: autoTest
             });
         } catch (error) {
             next(error);
         }
     });
+
+// --- Batch Test Management --- (/api/admin/batch-test)
+router.post('/batch-test/run', async (req, res, next) => {
+    try {
+        console.log('Manual batch test triggered via API');
+        const result = await batchTestService.runBatchTest();
+
+        res.json({
+            success: true,
+            message: 'Batch test completed',
+            ...result
+        });
+    } catch (error) {
+        console.error('Error running manual batch test:', error);
+        next(error);
+    }
+});
+
+router.get('/batch-test/status', async (req, res, next) => {
+    try {
+        const schedulerService = require('../services/schedulerService');
+        const schedulerStatus = schedulerService.getStatus();
+        const autoTestEnabled = await configService.getSetting('auto_test', '0');
+
+        res.json({
+            success: true,
+            autoTestEnabled: autoTestEnabled === '1',
+            schedulerStatus: schedulerStatus
+        });
+    } catch (error) {
+        console.error('Error getting batch test status:', error);
+        next(error);
+    }
+});
 
 
 module.exports = router;
